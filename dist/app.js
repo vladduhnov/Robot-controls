@@ -1,3 +1,5 @@
+import {VoiceRecognition} from './voice-recognition.js';
+import {executeVoiceTranscript} from './voice-commands.js';
 import * as THREE from './vendor/three.module.js';
 import {ChaseRig,screenToWorld,wallBlocksRobot} from './camera-rig.js';
 import {createSimulation,addTask,update,pickup,drop,findPath,OBSTACLES,ASSEMBLY,PICKUP} from './simulation.js';
@@ -62,21 +64,52 @@ const selection=new THREE.Mesh(new THREE.RingGeometry(.63,.66,64),new THREE.Mesh
 const raycaster=new THREE.Raycaster(),pointer=new THREE.Vector2();let pathLine=null;const routeMarkers=new THREE.Group();scene.add(routeMarkers);
 function notice(message){clearTimeout(noticeTimer);$('notice').textContent=message;$('notice').hidden=false;noticeTimer=setTimeout(()=>$('notice').hidden=true,3200);}
 function command(type,target,event={}){if(sim.mode!=='guide'){notice('Switch to click-to-guide to plan tasks.');return;}selected=true;labelHoldUntil=performance.now()+1500;const error=addTask(sim,type,target,true);if(error)notice(error);renderUI(true);}
-const labels={move:'Move to point',pickup:'Pick up box',build:'Build an item',drop:'Put down box'};
+const labels={move:'Move to point',pickup:'Pick up box',build:'Build an item',drop:'Put down box',putdown:'Put down box'};
+function taskLabel(task){return task.type==='drive'?`Move ${task.direction} · ${task.meters} m`:task.type==='turn'?`Turn ${task.direction}`:labels[task.type];}
+function taskStatus(task){return task.type==='drive'?`Moving ${task.direction}`:task.type==='turn'?'Turning':task.type==='putdown'?'Putting down':task.phase==='travel'?'On the way':task.type==='build'?'Assembling':task.type==='pickup'?'Picking up':'Arriving';}
+let lastVoiceCompletion=0;
+function voiceState(state,message){
+ const active=state==='starting'||state==='listening';
+ $('voice-toggle').setAttribute('aria-pressed',active);$('voice-toggle-label').textContent=active?'Stop listening':'Start listening';
+ $('voice-state').textContent=message;$('voice-controls').dataset.state=state;
+ if(['idle','error','unsupported'].includes(state)&&sim.mode==='voice'&&sim.queue.length)sim.paused=true;
+}
+const voice=new VoiceRecognition({
+ Recognition:window.SpeechRecognition||window.webkitSpeechRecognition,
+ onState:voiceState,
+ onTranscript:(text,final)=>{$('voice-heard').hidden=false;$('voice-heard').textContent=text;$('voice-heard').classList.toggle('interim',!final);},
+ onFinal:text=>{
+  if(sim.mode!=='voice')return;
+  const result=executeVoiceTranscript(sim,text);$('voice-feedback').textContent=result.message;
+  if(result.micOff)voice.stop();
+  renderUI(true);
+ }
+});
+if(!voice.supported){$('voice-toggle').disabled=true;voiceState('unsupported','Voice is unavailable in this browser. Open this site in Chrome or Safari.');}
+$('voice-toggle').onclick=()=>{if(voice.wanted)voice.stop();else voice.start();};
+
 function renderUI(force=false){
- const task=sim.queue[0],moving=sim.mode==='joystick'&&(joy.x||joy.z||keys.size);const status=sim.paused&&task?'Tasks paused':task?(task.phase==='travel'?'Moving to '+(task.type==='move'?'point':task.type==='pickup'?'pickup':'assembly'):task.type==='build'?'Assembling…':task.type==='pickup'?'Picking up…':'Arriving'):moving?'Driving':sim.carrying?'Carrying a box':sim.built?'Assembly complete':'Ready to move';
+ const task=sim.queue[0],moving=sim.mode==='joystick'&&(joy.x||joy.z||keys.size);
+ const status=sim.paused&&task?'Tasks paused':task?taskStatus(task):moving?'Driving':sim.carrying?'Carrying a box':sim.built?'Assembly complete':'Ready to move';
+ const completed=sim.completed.at(-1);
+ if(completed&&completed.id!==lastVoiceCompletion){lastVoiceCompletion=completed.id;if(completed.outcome){if(sim.mode==='voice')$('voice-feedback').textContent=completed.outcome;else notice(completed.outcome);}}
  if(status!==lastState){$('robot-state').textContent=status;lastState=status;}
  $('cargo-icon').hidden=!sim.carrying;$('pause').disabled=!task;$('clear').disabled=!task;$('manual-pickup').disabled=sim.carrying||!sim.box;$('manual-drop').disabled=!sim.carrying;
  const signature=JSON.stringify([sim.queue.map(t=>[t.id,t.phase]),sim.completed.length,sim.paused]);
  if(force||signature!==lastQueue){lastQueue=signature;$('queue-count').textContent=sim.queue.length;$('pause').setAttribute('aria-label',sim.paused?'Resume tasks':'Pause tasks');$('pause').title=sim.paused?'Resume tasks':'Pause tasks';$('pause').innerHTML=sim.paused?'<svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></svg>':'<svg viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg>';
- $('queue').innerHTML=sim.queue.length?sim.queue.map((t,i)=>`<div class="task ${i===0?'current':''}"><span class="task-number">${String(i+1).padStart(2,'0')}</span><span><strong>${labels[t.type]}</strong><small>${i===0?(sim.paused?'Paused':t.phase==='travel'?'On the way':t.type==='build'?'Assembling':'In progress'):'Queued'}</small></span><button class="remove" data-remove="${t.id}" aria-label="Remove ${labels[t.type].toLowerCase()}">×</button>${i===0?'<div class="task-progress" style="transform:scaleX(0)"></div>':''}</div>`).join(''):'';
+ $('queue').innerHTML=sim.queue.length?sim.queue.map((t,i)=>`<div class="task ${i===0?'current':''}"><span class="task-number">${String(i+1).padStart(2,'0')}</span><span><strong>${taskLabel(t)}</strong><small>${i===0?(sim.paused?'Paused':taskStatus(t)):'Queued'}</small></span><button class="remove" data-remove="${t.id}" aria-label="Remove ${taskLabel(t).toLowerCase()}">×</button>${i===0?'<div class="task-progress" style="transform:scaleX(0)"></div>':''}</div>`).join(''):'';
  $('queue').hidden=!sim.queue.length;document.querySelector('.queue-buttons').hidden=!sim.queue.length;document.querySelector('.queue-section').classList.toggle('has-tasks',!!sim.queue.length);refreshRoute();}
  const progress=document.querySelector('.task-progress');if(progress)progress.style.transform=`scaleX(${task?.progress||0})`;
 }
-function refreshRoute(){if(pathLine){scene.remove(pathLine);pathLine.geometry.dispose();pathLine.material.dispose();pathLine=null;}while(routeMarkers.children.length){const c=routeMarkers.children[0];routeMarkers.remove(c);c.geometry.dispose();c.material.dispose();}if(!sim.queue.length)return;
- let points=[new THREE.Vector3(sim.robot.x,.035,sim.robot.z)];for(const t of sim.queue){const previous=points.at(-1);const route=t.path||findPath({x:previous.x,z:previous.z},t.target)||[];for(const p of route)points.push(new THREE.Vector3(p.x,.035,p.z));const marker=new THREE.Mesh(new THREE.RingGeometry(.17,.205,32),new THREE.MeshBasicMaterial({color:0x242424,side:THREE.DoubleSide}));marker.rotation.x=-Math.PI/2;marker.position.set(t.target.x,.04,t.target.z);routeMarkers.add(marker);}
+function refreshRoute(){if(pathLine){scene.remove(pathLine);pathLine.geometry.dispose();pathLine.material.dispose();pathLine=null;}while(routeMarkers.children.length){const c=routeMarkers.children[0];routeMarkers.remove(c);c.geometry.dispose();c.material.dispose();}if(!sim.queue.length||['drive','turn','putdown'].includes(sim.queue[0].type))return;
+ let points=[new THREE.Vector3(sim.robot.x,.035,sim.robot.z)];for(const t of sim.queue){if(['drive','turn','putdown'].includes(t.type))break;const previous=points.at(-1);const route=t.path||findPath({x:previous.x,z:previous.z},t.target)||[];for(const p of route)points.push(new THREE.Vector3(p.x,.035,p.z));const marker=new THREE.Mesh(new THREE.RingGeometry(.17,.205,32),new THREE.MeshBasicMaterial({color:0x242424,side:THREE.DoubleSide}));marker.rotation.x=-Math.PI/2;marker.position.set(t.target.x,.04,t.target.z);routeMarkers.add(marker);}
  pathLine=new THREE.Line(new THREE.BufferGeometry().setFromPoints(points),new THREE.LineDashedMaterial({color:0x242424,dashSize:.1,gapSize:.09,transparent:true,opacity:.7}));pathLine.computeLineDistances();scene.add(pathLine);}
-function setMode(mode){sim.mode=mode;keys.clear();releaseJoystick();if(mode==='joystick'&&sim.queue.length)sim.paused=true;for(const m of ['guide','joystick']){$(m+'-mode').classList.toggle('active',m===mode);$(m+'-mode').setAttribute('aria-pressed',m===mode);if($(m+'-controls'))$(m+'-controls').hidden=m!==mode;}renderUI(true);}
+function setMode(mode){
+ if(sim.mode==='voice'&&mode!=='voice')voice.stop();
+ sim.mode=mode;keys.clear();releaseJoystick();if(mode!=='guide'&&sim.queue.length)sim.paused=true;
+ for(const m of ['guide','joystick','voice']){$(m+'-mode').classList.toggle('active',m===mode);$(m+'-mode').setAttribute('aria-pressed',m===mode);if($(m+'-controls'))$(m+'-controls').hidden=m!==mode;}
+ renderUI(true);
+}
 function setView(next){
  labelHoldUntil=0;hoveredLabels.clear();view=next;camera=next==='top'?topCamera:chase.camera;
  if(next==='third')chase.reset(sim.robot);
@@ -118,7 +151,7 @@ function keepRobotVisible(dt){
   mesh.material.transparent=true;mesh.material.opacity=.16;mesh.material.depthWrite=false;fadedMeshes.add(mesh);
  }
 }
-$('guide-mode').onclick=()=>setMode('guide');$('joystick-mode').onclick=()=>setMode('joystick');$('third-person').onclick=()=>setView('third');$('top-down').onclick=()=>setView('top');$('recenter').onclick=()=>{chase.reset(sim.robot);resize();};
+$('guide-mode').onclick=()=>setMode('guide');$('joystick-mode').onclick=()=>setMode('joystick');$('voice-mode').onclick=()=>setMode('voice');$('third-person').onclick=()=>setView('third');$('top-down').onclick=()=>setView('top');$('recenter').onclick=()=>{chase.reset(sim.robot);resize();};
 for(const id of ['pickup-label','assembly-label']){
  $(id).addEventListener('pointerenter',()=>hoveredLabels.add(id));
  $(id).addEventListener('pointerleave',()=>hoveredLabels.delete(id));
@@ -129,11 +162,11 @@ $('select-robot').onclick=()=>{selected=true;renderer.domElement.focus({preventS
 $('pause').onclick=()=>{sim.paused=!sim.paused;renderUI(true);};
 function clearTasks(){sim.queue=[];sim.activeTime=0;sim.paused=false;renderUI(true);}
 $('clear').onclick=clearTasks;
-function stop(){clearTasks();releaseJoystick();keys.clear();renderUI(true);}
+function stop(){voice.stop();clearTasks();releaseJoystick();keys.clear();renderUI(true);}
 
-$('reset').onclick=()=>{sim=createSimulation();labelHoldUntil=0;hoveredLabels.clear();selected=true;builtItem.visible=false;robot.rotation.y=sim.robot.angle;chase.reset(sim.robot);setMode('guide');$('notice').hidden=true;renderUI(true);};
+$('reset').onclick=()=>{voice.stop();lastVoiceCompletion=0;$('voice-heard').hidden=true;$('voice-feedback').textContent='Try “Go forward” or “Pick up the box”.';sim=createSimulation();labelHoldUntil=0;hoveredLabels.clear();selected=true;builtItem.visible=false;robot.rotation.y=sim.robot.angle;chase.reset(sim.robot);setMode('guide');$('notice').hidden=true;renderUI(true);};
 $('queue').onclick=e=>{const b=e.target.closest('[data-remove]');if(b){const i=sim.queue.findIndex(t=>t.id===+b.dataset.remove);sim.queue.splice(i,1);if(i===0)sim.activeTime=0;validateQueue();renderUI(true);}};
-function validateQueue(){let carrying=sim.carrying;sim.queue=sim.queue.filter(t=>{if(t.type==='pickup'){if(carrying)return false;carrying=true;}if(t.type==='build'){if(!carrying)return false;carrying=false;}return true;});for(const t of sim.queue)t.path=null;}
+function validateQueue(){let carrying=sim.carrying;sim.queue=sim.queue.filter(t=>{if(t.type==='pickup'){if(carrying)return false;carrying=true;}if(['build','putdown','drop'].includes(t.type)){if(!carrying)return false;carrying=false;}return true;});for(const t of sim.queue)t.path=null;}
 $('manual-pickup').onclick=()=>{const error=pickup(sim);if(error)notice(error);renderUI(true);};$('manual-drop').onclick=()=>{const error=drop(sim);if(error)notice(error);renderUI(true);};
 renderer.domElement.addEventListener('pointerdown',e=>{
  if(pointerStart||e.button>0)return;
@@ -165,7 +198,8 @@ function moveJoystick(e){const r=$('joystick').getBoundingClientRect(),dx=e.clie
 $('joystick').addEventListener('pointerdown',e=>{if(joystickPointer!==null)return;joystickPointer=e.pointerId;$('joystick').setPointerCapture(e.pointerId);moveJoystick(e);});$('joystick').addEventListener('pointermove',e=>{if(e.pointerId===joystickPointer)moveJoystick(e);});
 function releaseJoystick(){joystickPointer=null;joy={x:0,z:0};$('joystick-knob').style.transform='translate(0,0)';}
 for(const event of ['pointerup','pointercancel','lostpointercapture'])$('joystick').addEventListener(event,releaseJoystick);
-window.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();return;}if(sim.mode==='joystick'&&['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();keys.add(e.key);if(sim.queue.length)sim.paused=true;}});window.addEventListener('keyup',e=>keys.delete(e.key));window.addEventListener('blur',()=>{releaseJoystick();keys.clear();});document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseJoystick();keys.clear();}});
+window.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();return;}if(sim.mode==='joystick'&&['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();keys.add(e.key);if(sim.queue.length)sim.paused=true;}});window.addEventListener('keyup',e=>keys.delete(e.key));window.addEventListener('blur',()=>{releaseJoystick();keys.clear();});document.addEventListener('visibilitychange',()=>{if(document.hidden){voice.stop();releaseJoystick();keys.clear();}});
+window.addEventListener('pagehide',()=>voice.stop());
 let last=performance.now(),routeTick=0;function frame(now){requestAnimationFrame(frame);const dt=Math.min((now-last)/1000,.05);last=now;let input={x:joy.x+(keys.has('d')||keys.has('ArrowRight')?1:0)-(keys.has('a')||keys.has('ArrowLeft')?1:0),z:joy.z+(keys.has('s')||keys.has('ArrowDown')?1:0)-(keys.has('w')||keys.has('ArrowUp')?1:0)};
  // Direct control is aligned with the current view.
  if(sim.mode==='joystick'&&(input.x||input.z))manualMovingUntil=now+900;

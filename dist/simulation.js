@@ -17,7 +17,7 @@ export function findPath(start,end){
 export function createSimulation(){return {robot:{x:-2.7,z:2.3,angle:Math.PI-.35},box:{...PICKUP},carrying:false,built:false,queue:[],completed:[],paused:false,mode:'guide',activeTime:0,nextId:1};}
 export function addTask(s,type,target,append=false){
  let cargo=s.carrying;
- if(append)for(const t of s.queue){if(t.type==='pickup')cargo=true;if(t.type==='build'||t.type==='drop')cargo=false;}
+ if(append)for(const t of s.queue){if(t.type==='pickup')cargo=true;if(t.type==='build'||t.type==='drop'||t.type==='putdown')cargo=false;}
  if(type==='pickup'&&cargo)return 'The robot is already carrying a box.';
  if(type==='build'&&!cargo)return 'Pick up a box before assembling it.';
  if(type==='pickup'&&!s.box)return 'No box to pick up. Reset to start again.';
@@ -29,13 +29,49 @@ export function addTask(s,type,target,append=false){
 }
 export function update(s,dt,input={x:0,z:0}){
  if(s.mode==='joystick'&&(input.x||input.z)){
- s.paused=!!s.queue.length;s.activeTime=0;for(const task of s.queue){task.path=null;task.phase='travel';task.progress=0;}
+ s.paused=!!s.queue.length;s.activeTime=0;for(const task of s.queue){task.path=null;task.phase=['drive','turn','putdown'].includes(task.type)?'pending':'travel';task.progress=0;}
  const length=Math.hypot(input.x,input.z),speed=1.75*dt/Math.max(1,length),dx=input.x*speed,dz=input.z*speed;
  if(isFree(s.robot.x+dx,s.robot.z))s.robot.x+=dx;if(isFree(s.robot.x,s.robot.z+dz))s.robot.z+=dz;
  s.robot.angle=Math.atan2(input.x,input.z);return;
  }
  if(s.paused||!s.queue.length)return;
- let task=s.queue[0];if(!task.path)task.path=findPath(s.robot,task.target);
+ let task=s.queue[0];
+ const finish=outcome=>{if(outcome)task.outcome=outcome;s.completed.push(task);s.queue.shift();s.activeTime=0;};
+ if(task.type==='turn'){
+  if(task.phase==='pending'){task.heading=s.robot.angle+task.radians;task.phase='work';}
+  const delta=Math.atan2(Math.sin(task.heading-s.robot.angle),Math.cos(task.heading-s.robot.angle)),step=dt*2.4;
+  if(Math.abs(delta)<=step){s.robot.angle=task.heading;task.progress=1;finish();}
+  else{s.robot.angle+=Math.sign(delta)*step;task.progress=1-Math.abs(delta)/Math.abs(task.radians);}return;
+ }
+ if(task.type==='drive'){
+  if(task.phase==='pending'){
+   const offset={forward:0,backward:Math.PI,left:Math.PI/2,right:-Math.PI/2}[task.direction];
+   task.heading=s.robot.angle;task.dx=Math.sin(task.heading+offset);task.dz=Math.cos(task.heading+offset);task.remaining=task.meters;task.phase='work';
+   task.target={x:s.robot.x+task.dx*task.meters,z:s.robot.z+task.dz*task.meters};
+  }
+  let budget=Math.min(dt*1.65,task.remaining);
+  while(budget>1e-6){
+   const step=Math.min(budget,.05),x=s.robot.x+task.dx*step,z=s.robot.z+task.dz*step;
+   if(!isFree(x,z)){finish('Movement stopped at an obstacle.');return;}
+   s.robot.x=x;s.robot.z=z;s.robot.angle=task.heading;task.remaining-=step;budget-=step;
+  }
+  task.progress=1-task.remaining/task.meters;if(task.remaining<1e-5)finish();return;
+ }
+ if(task.type==='putdown'){
+  if(!s.carrying){finish('Pick up a box first.');return;}
+  if(distance(s.robot,ASSEMBLY)<1){task.type='build';task.target={...ASSEMBLY};task.path=null;task.phase='travel';}
+  else{
+   const point={x:s.robot.x+Math.sin(s.robot.angle)*.65,z:s.robot.z+Math.cos(s.robot.angle)*.65};
+   if(!isFree(point.x,point.z,.2)){finish('Move away from the obstacle before putting the box down.');return;}
+   s.box=point;s.carrying=false;finish();return;
+  }
+ }
+ if(task.type==='pickup'&&task.phase==='travel'&&!task.path){
+  if(!s.box){finish('No box available to pick up.');return;}
+  task.target={...s.box};
+ }
+ if(task.type==='build'&&!s.carrying){finish('Pick up a box before assembling it.');return;}
+ if(!task.path)task.path=findPath(s.robot,task.target);
  if(!task.path){s.queue.shift();s.activeTime=0;return;}
  if(task.phase==='travel'){
  let budget=dt*1.65;while(task.path.length&&budget>0){let point=task.path[0],d=distance(s.robot,point);if(d>.001)s.robot.angle=Math.atan2(point.x-s.robot.x,point.z-s.robot.z);if(d<=budget){s.robot.x=point.x;s.robot.z=point.z;task.path.shift();budget-=d;}else{s.robot.x+=(point.x-s.robot.x)/d*budget;s.robot.z+=(point.z-s.robot.z)/d*budget;budget=0;}}
