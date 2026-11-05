@@ -1,0 +1,9 @@
+.DS_Store
+.openai/
+node_modules/
+.env
+.env.*
+!.env.example
+/preview.png
+/complete-room.png
+/wall-transparency.png
